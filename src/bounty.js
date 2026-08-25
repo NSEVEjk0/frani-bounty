@@ -82,7 +82,8 @@ function feeInfo(b) {
 export function summarizeBounty(client, b) {
   const who = b.claimerNametag ? ` · @${b.claimerNametag}` : b.claimer ? ' · claimed' : '';
   const title = b.title ? ` · "${b.title}"` : '';
-  return `#${b.id} · ${b.status} · ${client.fmt(b.rewardBase)}${who}${title}`;
+  const settling = b.settleRetry ? ' · ⏳ settling' : '';
+  return `#${b.id} · ${b.status} · ${client.fmt(b.rewardBase)}${who}${title}${settling}`;
 }
 
 /** Multi-line detail for `view <id>`. */
@@ -109,6 +110,7 @@ export function describeBounty(client, b, now = Date.now()) {
   }
   if (b.releaseUnconfirmed) lines.push('⚠︎ payout sent but network confirmation is pending');
   if (b.refundUnconfirmed) lines.push('⚠︎ refund sent but network confirmation is pending');
+  if (b.settleRetry) lines.push(`⏳ settlement pending — the board is retrying the ${b.settleRetry.move}; your funds are safe in escrow.`);
   return lines.filter(Boolean).join('\n');
 }
 
@@ -125,13 +127,35 @@ function record(state, kind, b, extra = {}) {
   });
 }
 
+// ── settlement-retry marker ───────────────────────────────────────────────────
+/**
+ * Tag a bounty whose money move was TRANSIENTLY held — the co-mingling guard
+ * (book not yet reconciled up to the just-received escrow), an owner `pause`, or
+ * the payout rate cap — so the periodic sweep re-attempts it. Crucially, a held
+ * attempt moves NO funds: the guarded send returns before it debits the book or
+ * sends anything, so a retry can never double-pay. The marker is cleared the
+ * instant the move finally settles. `since` is preserved across retries and
+ * `attempts` counts them, purely for observability. `move` is 'release' or
+ * 'refund'; the rest carries exactly the args needed to re-drive that move.
+ */
+function markSettleRetry(b, fields, now = Date.now()) {
+  const prev = b.settleRetry;
+  b.settleRetry = {
+    ...fields,
+    since: prev?.since ?? now,
+    attempts: (prev?.attempts ?? 0) + 1,
+    lastAt: now,
+  };
+  b.updatedAt = now;
+}
+
 // ── core money move: RELEASE reward to the claimer ────────────────────────────
 /**
  * Pay the reward (minus fee) to a bounty's confirmed claimer. Persists a RELEASING
  * marker + the exact payout before the send so a crash can be recovered without a
  * double-pay. The fee stays in the wallet as accrued, withdrawable earnings.
  */
-async function releaseBounty(client, state, rateLimit, b, { byTimeout = false, byOwner = false } = {}) {
+async function releaseBounty(client, state, rateLimit, b, { byTimeout = false, byOwner = false, retry = false } = {}) {
   if (!b.claimer || !b.claimerRecipient) {
     log.warn(`Cannot release #${b.id}: no claimer on record.`);
     return { ok: false, reason: 'no-claimer' };
@@ -139,12 +163,18 @@ async function releaseBounty(client, state, rateLimit, b, { byTimeout = false, b
   // Owner runtime freeze (DM `pause`): hold all outflow without a redeploy.
   if (state.paused) {
     log.warn(`Board is paused — holding release for #${b.id}.`);
-    await reply(client, b.claimerRecipient, rateLimit, `Payouts are paused by the operator right now. Your reward for #${b.id} is safe in escrow and will pay out once resumed. ${sig()}`, { priority: true });
+    markSettleRetry(b, { move: 'release', byTimeout, byOwner, heldBecause: 'paused' });
+    state.putBounty(b);
+    state.save();
+    if (!retry) await reply(client, b.claimerRecipient, rateLimit, `Payouts are paused by the operator right now. Your reward for #${b.id} is safe in escrow and will pay out once resumed. ${sig()}`, { priority: true });
     return { ok: false, held: true, skipped: 'paused' };
   }
   // Bound the NUMBER of outbound payouts per hour (rate, not amount).
   if (!rateLimit.allow('release', config.safety.maxReleasesPerHour)) {
     log.warn(`Release rate cap reached — deferring payout for #${b.id}.`);
+    markSettleRetry(b, { move: 'release', byTimeout, byOwner, heldBecause: 'deferred' });
+    state.putBounty(b);
+    state.save();
     return { ok: false, deferred: true };
   }
 
@@ -169,17 +199,26 @@ async function releaseBounty(client, state, rateLimit, b, { byTimeout = false, b
     b.status = prior;
     delete b.releasingBase;
     delete b.releasingFeeBase;
+    // escrow-protect / release-disabled are TRANSIENT (the book reconciles up once
+    // quiescent, or the operator resumes) → schedule a sweep retry so the promised
+    // payout actually happens. 'non-positive amount' is degenerate (can't occur
+    // post-feeInfo, which floors payout at the reward) → not retriable, don't mark.
+    if (res.skipped === 'escrow-protect' || res.skipped === 'release-disabled') {
+      markSettleRetry(b, { move: 'release', byTimeout, byOwner, heldBecause: res.skipped });
+    }
     state.putBounty(b);
     state.save();
     if (res.skipped === 'escrow-protect') {
-      log.error(`Release of #${b.id} hit the escrow-protection floor — this should not happen; holding.`);
+      log.warn(`Release of #${b.id} hit the escrow-protection floor — held; the sweep will retry once the book reconciles.`);
     }
     const why =
       res.skipped === 'release-disabled'
         ? 'Payouts are paused by the operator right now'
         : 'The board is briefly protecting other escrow';
-    await reply(client, b.claimerRecipient, rateLimit, `${why}. Your reward for #${b.id} is safe in escrow and will pay out shortly. ${sig()}`, { priority: true });
-    await notifyOwner(client, state, rateLimit, `Release of #${b.id} held (${res.skipped}); reward safe in escrow.`);
+    if (!retry) {
+      await reply(client, b.claimerRecipient, rateLimit, `${why}. Your reward for #${b.id} is safe in escrow and will pay out shortly. ${sig()}`, { priority: true });
+      await notifyOwner(client, state, rateLimit, `Release of #${b.id} held (${res.skipped}); reward safe in escrow — retrying automatically.`);
+    }
     return { ok: false, held: true, skipped: res.skipped };
   }
 
@@ -193,6 +232,7 @@ async function releaseBounty(client, state, rateLimit, b, { byTimeout = false, b
   b.outcome = { kind: 'released', byTimeout, byOwner, unconfirmed, dry };
   delete b.releasingBase;
   delete b.releasingFeeBase;
+  delete b.settleRetry; // settled → clear any transient-hold retry marker
   state.putBounty(b);
 
   state.bumpStat('bountiesReleased');
@@ -221,7 +261,7 @@ async function releaseBounty(client, state, rateLimit, b, { byTimeout = false, b
 }
 
 // ── core money move: REFUND funds to the poster (always full, no fee) ─────────
-async function refundBounty(client, state, rateLimit, b, { kind = 'refunded', reason = '' } = {}) {
+async function refundBounty(client, state, rateLimit, b, { kind = 'refunded', reason = '', retry = false } = {}) {
   const terminal =
     kind === 'cancelled' ? STATUS.CANCELLED : kind === 'expired' ? STATUS.EXPIRED : STATUS.REFUNDED;
   const amountBase = state.heldBase(b);
@@ -232,6 +272,7 @@ async function refundBounty(client, state, rateLimit, b, { kind = 'refunded', re
     b.status = terminal;
     b.resolvedAt = now;
     b.outcome = { kind, reason, amountBase: '0' };
+    delete b.settleRetry; // nothing to move → no retry needed
     state.putBounty(b);
     state.bumpStat(kind === 'expired' ? 'bountiesExpired' : kind === 'cancelled' ? 'bountiesCancelled' : 'bountiesRefunded');
     record(state, kind === 'expired' ? 'expire' : 'cancel', b, { amountBase: '0', note: reason || 'nothing funded' });
@@ -242,12 +283,18 @@ async function refundBounty(client, state, rateLimit, b, { kind = 'refunded', re
   // Owner runtime freeze (DM `pause`): hold the refund without a redeploy.
   if (state.paused) {
     log.warn(`Board is paused — holding refund for #${b.id}.`);
-    await reply(client, b.posterRecipient, rateLimit, `Refunds are paused by the operator right now. Your ${client.fmt(amountBase)} on #${b.id} is safe and will be returned once resumed. ${sig()}`, { priority: true });
+    markSettleRetry(b, { move: 'refund', kind, note: reason, heldBecause: 'paused' });
+    state.putBounty(b);
+    state.save();
+    if (!retry) await reply(client, b.posterRecipient, rateLimit, `Refunds are paused by the operator right now. Your ${client.fmt(amountBase)} on #${b.id} is safe and will be returned once resumed. ${sig()}`, { priority: true });
     return { ok: false, held: true, skipped: 'paused' };
   }
 
   if (!rateLimit.allow('release', config.safety.maxReleasesPerHour)) {
     log.warn(`Release rate cap reached — deferring refund for #${b.id}.`);
+    markSettleRetry(b, { move: 'refund', kind, note: reason, heldBecause: 'deferred' });
+    state.putBounty(b);
+    state.save();
     return { ok: false, deferred: true };
   }
 
@@ -265,10 +312,14 @@ async function refundBounty(client, state, rateLimit, b, { kind = 'refunded', re
   if (res?.skipped === 'release-disabled' || res?.skipped === 'escrow-protect' || res?.skipped === 'non-positive amount') {
     b.status = prior;
     delete b.refundingBase;
+    // Transient holds get a sweep retry so the refund we promised actually lands.
+    if (res.skipped === 'escrow-protect' || res.skipped === 'release-disabled') {
+      markSettleRetry(b, { move: 'refund', kind, note: reason, heldBecause: res.skipped });
+    }
     state.putBounty(b);
     state.save();
     const why = res.skipped === 'release-disabled' ? 'Refunds are paused by the operator right now' : 'The board is briefly protecting other escrow';
-    await reply(client, b.posterRecipient, rateLimit, `${why}. Your ${client.fmt(amountBase)} on #${b.id} is safe and will be returned shortly. ${sig()}`, { priority: true });
+    if (!retry) await reply(client, b.posterRecipient, rateLimit, `${why}. Your ${client.fmt(amountBase)} on #${b.id} is safe and will be returned shortly. ${sig()}`, { priority: true });
     return { ok: false, held: true, skipped: res.skipped };
   }
 
@@ -279,6 +330,7 @@ async function refundBounty(client, state, rateLimit, b, { kind = 'refunded', re
   b.resolvedAt = now;
   b.outcome = { kind, reason, amountBase: amountBase.toString(), unconfirmed, dry };
   delete b.refundingBase;
+  delete b.settleRetry; // settled → clear any transient-hold retry marker
   state.putBounty(b);
 
   state.bumpStat('bountiesRefunded');
@@ -423,12 +475,21 @@ export async function createBounty(client, state, rateLimit, { dm, rewardWhole, 
  * credited to the book here — the quiescent reconcile heals the book upward once
  * settled, keeping the outflow guard conservative in the meantime.
  */
-export async function applyIncomingFunds(client, state, rateLimit, { senderPubkey, senderNametag, amountBase }) {
+export async function applyIncomingFunds(client, state, rateLimit, { senderPubkey, senderNametag, amountBase, transferId = null }) {
   const amount = BigInt(amountBase);
   if (amount <= 0n) return { matched: 'none' };
   const key = normalizeKey(senderPubkey);
   const recipient = recipientFromSender(senderPubkey, senderNametag);
   const now = Date.now();
+
+  // Persist a credit and the transfer's dedup mark in a SINGLE atomic write, so the
+  // id is recorded as handled only once its funds have actually been credited. If
+  // anything throws before commit(), nothing is marked and the SDK redelivers the
+  // transfer on its next drain — we retry rather than silently strand the money.
+  const commit = () => {
+    if (transferId) state.markTransferSeen(transferId);
+    state.save();
+  };
 
   // (A) Fund the sender's oldest unfunded draft.
   const drafts = state.unfundedDraftsByPoster(key);
@@ -453,7 +514,7 @@ export async function applyIncomingFunds(client, state, rateLimit, { senderPubke
         state.addStatBase('tipsLifetimeBase', excess);
         record(state, 'tip', d, { party: key, amountBase: excess.toString(), note: 'funding overpay' });
       }
-      state.save();
+      commit();
 
       await reply(client, recipient, rateLimit, `Bounty #${d.id} is funded and LIVE 🎉 — ${client.fmt(reward)} in escrow. Workers can now \`claim ${d.id}\`.${excess > 0n ? ` (You sent ${client.fmt(excess)} over the reward — kept as a tip to the board, thank you!)` : ''} ${sig()}`, { priority: true });
       return { matched: 'draft-funded', id: d.id };
@@ -462,7 +523,7 @@ export async function applyIncomingFunds(client, state, rateLimit, { senderPubke
     // Partial funding — keep accumulating.
     state.putBounty(d);
     record(state, 'fund-partial', d, { party: key, amountBase: amount.toString() });
-    state.save();
+    commit();
     const remaining = reward - BigInt(d.fundedBase);
     await reply(client, recipient, rateLimit, `Received ${client.fmt(amount)} toward #${d.id} (${client.fmt(d.fundedBase)} of ${client.fmt(reward)}). ${client.fmt(remaining)} to go — send it before ${fmtWhen(d.fundDeadline)} to make it live. ${sig()}`, { priority: true });
     return { matched: 'draft-partial', id: d.id };
@@ -478,7 +539,7 @@ export async function applyIncomingFunds(client, state, rateLimit, { senderPubke
       state.putBounty(b);
       state.clearPendingTopup(key);
       record(state, 'topup', b, { party: key, amountBase: amount.toString() });
-      state.save();
+      commit();
 
       await reply(client, recipient, rateLimit, `Added ${client.fmt(amount)} to #${b.id} — reward is now ${client.fmt(b.rewardBase)}. ${sig()}`, { priority: true });
       if (b.poster !== key) await reply(client, b.posterRecipient, rateLimit, `Your bounty #${b.id} was boosted; reward is now ${client.fmt(b.rewardBase)}. ${sig()}`, { priority: true });
@@ -493,7 +554,7 @@ export async function applyIncomingFunds(client, state, rateLimit, { senderPubke
   state.addSweepable(amount);
   state.addStatBase('tipsLifetimeBase', amount);
   record(state, 'tip', null, { party: key, amountBase: amount.toString() });
-  state.save();
+  commit();
   await reply(client, recipient, rateLimit, `Thanks for the ${client.fmt(amount)} tip! 🙏 To post a bounty, DM \`create <reward> <what needs doing>\`. ${sig()}`, { priority: true });
   return { matched: 'tip' };
 }
@@ -513,6 +574,12 @@ export async function claimBounty(client, state, rateLimit, { dm, bountyId }) {
   }
   if (b.status !== STATUS.OPEN) {
     await reply(client, recipient, rateLimit, `Bounty #${b.id} is ${b.status}, not open to claim. ${sig()}`);
+    return { ok: false };
+  }
+  if (b.settleRetry) {
+    // A cancel/refund is pending on this OPEN bounty; the funds are committed back
+    // to the poster, so it must not be claimable until the refund settles.
+    await reply(client, recipient, rateLimit, `Bounty #${b.id} is being settled right now and can't be claimed. ${sig()}`);
     return { ok: false };
   }
   if (claimerKey === b.poster) {
@@ -717,6 +784,10 @@ export async function addReward(client, state, rateLimit, { dm, bountyId, amount
     await reply(client, recipient, rateLimit, `You can only boost a live bounty; #${b.id} is ${b.status}. ${sig()}`);
     return { ok: false };
   }
+  if (b.settleRetry) {
+    await reply(client, recipient, rateLimit, `#${b.id} is being settled right now; boosts are paused for it. ${sig()}`);
+    return { ok: false };
+  }
   const amountBase = client.toBase(amountWhole);
   const maxBase = client.toBase(config.bounty.maxRewardWhole);
   if (amountBase <= 0n || amountBase > maxBase) {
@@ -768,6 +839,28 @@ export async function sweep(client, state, rateLimit, now = Date.now()) {
   for (const b of state.allBounties()) {
     if (TERMINAL_STATUSES.has(b.status)) continue;
     if (b.status === STATUS.RELEASING || b.status === STATUS.REFUNDING) continue; // handled at boot
+
+    // ── transiently-held settlement: retry the money move that was deferred ──────
+    // A held attempt (co-mingling guard / pause / rate cap) moved NO funds, so
+    // re-driving it can't double-pay. The move clears its own marker on success;
+    // while still held it stays SILENT (no repeated "safe, returned shortly" DMs).
+    // We handle the bounty entirely here and skip the normal status branches so a
+    // pending-refund OPEN bounty can't also be expired or reminded in the meantime.
+    if (b.settleRetry) {
+      const r = b.settleRetry;
+      const res =
+        r.move === 'release'
+          ? await releaseBounty(client, state, rateLimit, b, { byTimeout: r.byTimeout, byOwner: r.byOwner, retry: true })
+          : await refundBounty(client, state, rateLimit, b, { kind: r.kind, reason: r.note, retry: true });
+      if (res?.ok && !res.nothing) {
+        if (r.move === 'release') summary.autoReleased += 1;
+        else {
+          summary.refunded += 1;
+          if (r.kind === 'expired') summary.expired += 1;
+        }
+      }
+      continue;
+    }
 
     // ── DRAFT: fund window ──────────────────────────────────────────────────
     if (b.status === STATUS.DRAFT) {

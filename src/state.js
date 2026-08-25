@@ -169,6 +169,10 @@ export class State {
   markTransferSeen(id) {
     return ringAdd(this.data.seenTransferIds, id);
   }
+  /** Peek whether a transfer id was already handled, WITHOUT marking it seen. */
+  hasTransferSeen(id) {
+    return !!id && this.data.seenTransferIds.includes(id);
+  }
   markPaymentReqSeen(id) {
     return ringAdd(this.data.handledPaymentReqIds, id);
   }
@@ -256,7 +260,10 @@ export class State {
   }
 
   openBounties() {
-    return this.bountiesWhere((b) => b.status === STATUS.OPEN);
+    // Exclude bounties mid-settlement (a held refund awaiting a sweep retry): the
+    // funds are already committed back to the poster, so they must not be
+    // advertised as claimable or counted as open while the refund is in flight.
+    return this.bountiesWhere((b) => b.status === STATUS.OPEN && !b.settleRetry);
   }
 
   bountiesByPoster(pubkey) {

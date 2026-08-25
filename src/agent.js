@@ -95,19 +95,28 @@ export async function startAgent(client, signal) {
   // ── event handlers ──────────────────────────────────────────────────────────
   async function onTransfer(transfer) {
     if (signal.aborted || !transfer?.id) return;
-    if (!state.markTransferSeen(transfer.id)) return; // relay / receive() double-delivery
-    state.save();
-    if (selfNorm.has(normalizeKey(transfer.senderPubkey))) return; // ignore our own change/outputs
+    if (state.hasTransferSeen(transfer.id)) return; // already handled (relay / receive() double-delivery)
     const amountBase = uctAmount(client, transfer);
-    if (amountBase <= 0n) return; // non-UCT or empty transfer
+    // Our own change/outputs, or a non-UCT / empty transfer: nothing to credit, so
+    // record it seen right away — there are no funds to lose by acking it now.
+    if (selfNorm.has(normalizeKey(transfer.senderPubkey)) || amountBase <= 0n) {
+      state.markTransferSeen(transfer.id);
+      state.save();
+      return;
+    }
+    // A real inbound credit. We deliberately do NOT mark it seen here first:
+    // applyIncomingFunds records the id atomically with the credit (commit()), so a
+    // mid-credit failure below leaves the transfer un-acked and the SDK redelivers it
+    // on the next drain — the funds are retried, never silently stranded.
     try {
       await bounty.applyIncomingFunds(client, state, rateLimit, {
         senderPubkey: transfer.senderPubkey,
         senderNametag: transfer.senderNametag,
         amountBase,
+        transferId: transfer.id,
       });
     } catch (err) {
-      log.error(`transfer handler error: ${err?.stack ?? err?.message ?? err}`);
+      log.error(`transfer handler error (will retry on redelivery): ${err?.stack ?? err?.message ?? err}`);
     }
   }
 
