@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Wallet & runtime secrets — NEVER commit. Holds the BIP39 mnemonic, device id,
+# and the state ledger (escrow balances, bounty records).
+wallet-data/
+
+# Local environment overrides
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Ad-hoc test / scratch clients
+test-*.mjs
+
+# OS cruft
+.DS_Store

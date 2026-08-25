@@ -1,0 +1,24 @@
+{
+  "name": "frani-bounty",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "frani-bounty — an autonomous bounty board & custodial escrow for micro-bounties on Unicity testnet2. Made by CRYPTFRANI.",
+  "author": "Itachi (CRYPTFRANI)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --max-old-space-size=500 src/index.js",
+    "whoami": "node src/index.js --whoami",
+    "doctor": "node src/index.js --doctor",
+    "status": "node src/index.js --status",
+    "demo": "node src/index.js --demo"
+  },
+  "dependencies": {
+    "@unicitylabs/sphere-sdk": "^0.14.10",
+    "ws": "^8.21.3"
+  }
+}

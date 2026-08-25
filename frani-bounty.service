@@ -1,0 +1,37 @@
+[Unit]
+Description=frani-bounty — autonomous bounty board & custodial escrow on Unicity testnet2 (owner: Itachi · Made by CRYPTFRANI)
+Documentation=file:/root/frani-bounty/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/frani-bounty
+# --max-old-space-size=500 caps the V8 heap at ~500 MB; also mirrored in NODE_OPTIONS below.
+ExecStart=/usr/bin/node --max-old-space-size=500 src/index.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--max-old-space-size=500
+
+# Memory / swap policy:
+#   Physical RAM is left uncapped (no MemoryMax) so the kernel never cgroup-OOMs the
+#   process under load — it pages out instead. Swap usage for THIS service is bounded
+#   to 5 GB out of the host's existing swap. cgroup v2 + swap accounting required (present).
+MemoryAccounting=yes
+MemorySwapMax=5G
+
+# systemctl stop / restart sends SIGINT so the agent runs its graceful shutdown
+# (stop timers → persist state → close the Sphere connection) instead of being hard-killed.
+# The board also recovers any send interrupted mid-flight on the next boot (it never
+# resends — double-pay guard), so an abrupt kill is safe, just less tidy.
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+# Logs go to the journal → `journalctl -u frani-bounty -f`
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=frani-bounty
+
+[Install]
+WantedBy=multi-user.target
