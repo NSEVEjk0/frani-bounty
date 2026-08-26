@@ -35,7 +35,10 @@ function banner() {
 async function reportStatus(client) {
   const balance = await client.spendableWhole();
   log.info(`Identity : ${client.describe()}`);
-  log.info(`Pubkey   : ${client.identity.chainPubkey ?? '(n/a)'}  (set as OWNER_PUBKEY to enable admin)`);
+  // This is the AGENT's own key — never a candidate for OWNER_PUBKEY. The agent
+  // never DMs itself, so its own key as owner would arm an admin surface nobody
+  // can reach. OWNER_PUBKEY is the controlling identity's key, from elsewhere.
+  log.info(`Pubkey   : ${client.identity.chainPubkey ?? '(n/a)'}  (this agent's own signing key)`);
   log.info(`Coin     : ${client.coin.symbol} (${client.coin.decimals} decimals)`);
   log.info(`Balance  : ${balance} ${client.coin.symbol} (spendable)`);
   log.info(`Outflow  : ${config.safety.releaseEnabled ? 'ENABLED' : 'DISABLED'} · auto-release on confirm-timeout ${config.safety.autoReleaseOnConfirmTimeout}`);
