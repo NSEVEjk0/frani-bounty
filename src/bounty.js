@@ -277,6 +277,24 @@ async function refundBounty(client, state, rateLimit, b, { kind = 'refunded', re
     state.bumpStat(kind === 'expired' ? 'bountiesExpired' : kind === 'cancelled' ? 'bountiesCancelled' : 'bountiesRefunded');
     record(state, kind === 'expired' ? 'expire' : 'cancel', b, { amountBase: '0', note: reason || 'nothing funded' });
     state.save();
+    log.info(`Bounty #${b.id} ${terminal.toUpperCase()} · nothing was held${reason ? ` · ${reason}` : ''}.`);
+    // Close the loop. Every other exit from this function tells the poster what
+    // happened; this one used to return silently. Two ways in, both bad: `cancel` on
+    // an unfunded draft answered a direct instruction with nothing at all, and a draft
+    // whose funding window elapsed went quiet *after* the board had already sent
+    // "fund #id before <when> or it expires" — warned, then abandoned mid-sentence.
+    // There is no money to report, but the bounty is over and they asked, or were told
+    // it would happen. Priority so a rate cap can't eat the answer to an instruction.
+    if (!retry) {
+      const why = reason ? ` (${reason})` : '';
+      await reply(client, b.posterRecipient, rateLimit,
+        kind === 'cancelled'
+          ? `Bounty #${b.id} is cancelled${why}. Nothing had been funded into escrow, so there is nothing to refund — we're square. \`create <reward> <task>\` whenever you want to post another. ${sig()}`
+          : kind === 'expired'
+            ? `Bounty #${b.id} has expired${why}. Nothing had been funded into escrow, so there is nothing to return. \`create <reward> <task>\` to post it again. ${sig()}`
+            : `Bounty #${b.id} is closed${why}. Nothing had been funded into escrow, so there is nothing to return. ${sig()}`,
+        { priority: true });
+    }
     return { ok: true, nothing: true };
   }
 
