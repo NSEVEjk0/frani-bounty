@@ -74,10 +74,33 @@ const rawNametag = str('AGENT_NAME', str('NAMETAG', 'frani-bounty'))
   .toLowerCase();
 
 // Owner admin key: the on-network pubkey allowed to issue protected admin
-// commands over DM (resolve/pause/params/sweep-fees/…). EMPTY BY DEFAULT → the
-// admin surface is disabled entirely (safe). Set OWNER_PUBKEY to your
-// controlling identity's chain pubkey to enable it.
-const ownerPubkey = str('OWNER_PUBKEY', '').trim().toLowerCase();
+// commands over DM (resolve/pause/params/sweep-fees/…). EMPTY BY DEFAULT → the admin
+// surface is disabled entirely (safe). Accepts the controlling identity's chain
+// pubkey (66 hex, 02/03-prefixed) or its transport pubkey (64 hex) — normalizeKey()
+// strips the prefix, so both compare equal. Validated at boot: a nametag or a
+// DIRECT:// address is refused rather than quietly arming an admin surface that
+// can never authenticate a DM.
+const ownerPubkey = (() => {
+  const raw = str('OWNER_PUBKEY', '').trim().toLowerCase();
+  if (!raw) return ''; // unset → admin surface disabled, the safe default
+  // A pubkey, not an address and not a nametag. `enabled` is just `length > 0`, so
+  // anything non-empty arms the admin surface — and a wrong value arms one that can
+  // never authenticate, silently, forever. `normalizeKey` strips a 02/03 prefix, so
+  // both the 33-byte compressed chain pubkey and the 32-byte x-only transport pubkey
+  // are accepted and compare equal. Refuse everything else at boot, loudly.
+  const compressed = /^0[23][0-9a-f]{64}$/.test(raw);
+  const xonly = /^[0-9a-f]{64}$/.test(raw);
+  if (compressed || xonly) return raw;
+  const hint = raw.startsWith('@')
+    ? 'that is a nametag. Resolve it to a pubkey first (the DM surface compares keys, not names).'
+    : raw.startsWith('direct://')
+      ? 'that is a DIRECT address, not a key. An address is a one-way hash of a pubkey — resolve it with sphere.resolve() and use the chainPubkey it returns.'
+      : `expected 66 hex chars starting 02/03 (chain pubkey) or 64 hex chars (transport pubkey); got ${raw.length} chars.`;
+  throw new Error(
+    `OWNER_PUBKEY is not a pubkey: "${raw.slice(0, 24)}${raw.length > 24 ? '…' : ''}" — ${hint}\n` +
+      'Leave OWNER_PUBKEY unset to run with the admin surface disabled.',
+  );
+})();
 
 const config = Object.freeze({
   // ── Identity / branding ──────────────────────────────────────────────────
