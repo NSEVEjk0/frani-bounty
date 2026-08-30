@@ -22,6 +22,7 @@ test-*.mjs
 # The offline suites below are part of the deliverable: no network, no wallet,
 # no funds, no secrets. Every LIVE test stays ignored by the rule above — they
 # embed an oracle API key and read a mnemonic, so they must never be published.
+!test-balance-outage-unit.mjs
 !test-dedup-unit.mjs
 !test-retry-unit.mjs
 !test-silent-close-unit.mjs

@@ -248,11 +248,28 @@ export class SphereClient {
   }
 
   // ── balance ───────────────────────────────────────────────────────────────
-  async spendableBase() {
+  /**
+   * Read our coin's asset row, and say whether we actually got one.
+   *
+   * `payments.assets()` resolves with an EMPTY ARRAY when the wallet-api cannot
+   * be reached — it does not throw. So "no row for our coin" is two different
+   * facts wearing the same clothes: a wallet that genuinely holds nothing, and a
+   * backend that never answered. That matters most in the reconcile below: an
+   * empty read makes `transferringAmount` and `unconfirmedAmount` both parse as
+   * 0, so the wallet looks *quiescent* and the book would be overwritten with a
+   * zero we do not actually have — and persisted to disk.
+   */
+  async _coinRow() {
     const assets = await this.sphere.payments.assets(this.coin.coinId);
-    const a = assets.find((x) => x.coinId === this.coin.coinId);
-    if (!a) return 0n;
-    return BigInt(a.confirmedAmount ?? a.totalAmount ?? '0');
+    const row = Array.isArray(assets)
+      ? assets.find((x) => x.coinId === this.coin.coinId)
+      : undefined;
+    return { present: !!row, row: row ?? {} };
+  }
+
+  async spendableBase() {
+    const { row } = await this._coinRow();
+    return BigInt(row.confirmedAmount ?? row.totalAmount ?? '0');
   }
 
   async spendableWhole() {
@@ -282,11 +299,18 @@ export class SphereClient {
    * which only ever makes the outflow guard stricter, never looser.
    */
   async effectiveSpendableBase() {
-    const assets = await this.sphere.payments.assets(this.coin.coinId);
-    const a = assets.find((x) => x.coinId === this.coin.coinId) || {};
+    const { present, row: a } = await this._coinRow();
     const confirmed = BigInt(a.confirmedAmount ?? '0');
     const st = this._state;
     if (!st) return confirmed; // no attached ledger (one-shot CLI) → best-effort chain read
+
+    if (!present) {
+      // The wallet-api gave us nothing. Keep the last known book untouched and
+      // let the next real read heal it; never write a zero we cannot vouch for.
+      const known = st.getBookBase();
+      if (known != null) return known;
+      return confirmed; // no anchor yet either — report 0 but do NOT persist it
+    }
 
     const transferring = BigInt(a.transferringAmount ?? '0');
     const unconfirmed = BigInt(a.unconfirmedAmount ?? '0');
@@ -378,7 +402,14 @@ export class SphereClient {
     if (!config.safety.selfMintEnabled) return;
     const amt = config.safety.selfMintAmountWhole;
     if (!amt || amt <= 0) return;
-    const balance = await this.spendableBase();
+    const { present, row } = await this._coinRow();
+    if (!present) {
+      // An unanswered balance read is not a zero balance. Seeding here would
+      // mint a second time onto a wallet that may already hold custody funds.
+      log.warn('Balance unavailable (wallet-api gave no asset row) — skipping seed mint.');
+      return;
+    }
+    const balance = BigInt(row.confirmedAmount ?? row.totalAmount ?? '0');
     if (balance > 0n) {
       log.info(`Balance ${this.toWhole(balance)} ${this.coin.symbol} present; skipping seed mint.`);
       return;
