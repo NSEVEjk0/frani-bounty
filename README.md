@@ -255,7 +255,7 @@ Four offline suites — no network, no wallet, no funds:
 
 | Suite | What it pins |
 |---|---|
-| `test-balance-outage-unit.mjs` | a wallet-api outage is never read as a zero escrow balance — 19 assertions, 6 of which fail without the fix |
+| `test-balance-outage-unit.mjs` | a wallet-api outage is never read as a zero escrow balance — 21 assertions, 7 of which fail without the fix |
 | `test-silent-close-unit.mjs` | a bounty that closes holding nothing still *says* so — 18 assertions, 6 of which fail without the fix |
 | `test-dedup-unit.mjs` | the same payment is never credited twice |
 | `test-retry-unit.mjs` | a release that certified ambiguously is never re-sent (no double-pay) |

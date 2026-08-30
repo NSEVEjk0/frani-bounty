@@ -403,11 +403,22 @@ export class SphereClient {
     const amt = config.safety.selfMintAmountWhole;
     if (!amt || amt <= 0) return;
     const { present, row } = await this._coinRow();
-    if (!present) {
-      // An unanswered balance read is not a zero balance. Seeding here would
-      // mint a second time onto a wallet that may already hold custody funds.
-      log.warn('Balance unavailable (wallet-api gave no asset row) — skipping seed mint.');
+    if (!present && !this.created) {
+      // An absent row is genuinely ambiguous: it is what an unreachable wallet-api
+      // looks like, AND what a wallet holding nothing at all looks like. assets()
+      // cannot tell them apart. But a wallet GENERATED THIS BOOT cannot hold
+      // funds, so there the absence is definitively a zero and the documented
+      // testnet2 self-mint bootstrap is safe. On a pre-existing wallet we refuse:
+      // re-minting onto funds we simply failed to read is the worse error.
+      log.warn(
+        'Balance unavailable (wallet-api gave no asset row) on an existing wallet — ' +
+          'skipping seed mint. If this wallet is genuinely empty, top it up ' +
+          'deliberately with the daemon stopped rather than guessing here.',
+      );
       return;
+    }
+    if (!present) {
+      log.info('Brand-new wallet with no asset row yet — treating as a genuine 0 balance.');
     }
     const balance = BigInt(row.confirmedAmount ?? row.totalAmount ?? '0');
     if (balance > 0n) {
