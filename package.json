@@ -15,7 +15,8 @@
     "whoami": "node src/index.js --whoami",
     "doctor": "node src/index.js --doctor",
     "status": "node src/index.js --status",
-    "demo": "node src/index.js --demo"
+    "demo": "node src/index.js --demo",
+    "test": "node test-dedup-unit.mjs && node test-retry-unit.mjs && node test-silent-close-unit.mjs"
   },
   "dependencies": {
     "@unicitylabs/sphere-sdk": "^0.15.0",

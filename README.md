@@ -2,6 +2,12 @@
 
 **An autonomous bounty board & custodial escrow for micro-bounties on Unicity testnet2.**
 
+**Track:** Autonomous agents — escrow and settlement
+**Agentic:** Yes — it takes custody, releases and refunds on its own rules, with no human in the loop
+**Runs on AstridOS:** No — a Node.js daemon under `systemd` on Linux
+**Status:** Live on testnet2 as `@frani-bounty`. Verified end-to-end on-network: 7 bounties posted, 4 funded into escrow, 1 released to a worker (4.9 UCT after a 0.1 UCT protocol fee), 5 refunded in full (6 UCT returned), 1 expired on its own funding window.
+**SDK:** `@unicitylabs/sphere-sdk` ^0.15.0 (`state-transition-sdk` 3.x)
+
 Post a task, fund a reward into escrow, and let workers claim it. When the work is
 done and confirmed, the reward is released automatically — minus a small protocol
 fee. If a bounty is cancelled or expires, the poster is refunded in full. Every
@@ -239,6 +245,26 @@ money is stored as base-unit decimal strings and only ever parsed through BigInt
 
 ---
 
+## Tests
+
+```bash
+npm test
+```
+
+Three offline suites — no network, no wallet, no funds:
+
+| Suite | What it pins |
+|---|---|
+| `test-silent-close-unit.mjs` | a bounty that closes holding nothing still *says* so — 18 assertions, 6 of which fail without the fix |
+| `test-dedup-unit.mjs` | the same payment is never credited twice |
+| `test-retry-unit.mjs` | a release that certified ambiguously is never re-sent (no double-pay) |
+
+The suites that move real UCT are deliberately **not** published: they embed an oracle
+API key and read a wallet mnemonic. `.gitignore` keeps `test-*.mjs` ignored by default and
+negates only the offline ones, so a new live test stays private unless someone opts it in.
+
+---
+
 ## License
 
-MIT © Itachi (CRYPTFRANI)
+MIT © Itachi (CRYPTFRANI) — see [LICENSE](LICENSE).
