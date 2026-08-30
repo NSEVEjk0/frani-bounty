@@ -586,11 +586,6 @@ export class SphereClient {
     }
   }
 
-  /** secp256k1 signature over `message` using the agent's chain key. */
-  signMessage(message) {
-    return this.sphere.signMessage(message);
-  }
-
   async destroy() {
     if (this._destroyed) return;
     this._destroyed = true;
